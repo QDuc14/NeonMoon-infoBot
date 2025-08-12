@@ -1,11 +1,11 @@
-# Install node module
+# Install Node Module
 
 From root of the project open `Command Prompt` run:
 ```bash
 npm install
 ```
 
-# Run bot
+# Run Bot
 
 From root of the project open `Command Prompt` run:
 ```bash
