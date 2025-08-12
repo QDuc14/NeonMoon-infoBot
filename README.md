@@ -1,8 +1,17 @@
 # Install node module
 
+From root of the project:
 ```bash
 npm install
 ```
+
+# Run bot
+
+From root of the project:
+```bash
+npm start
+```
+
 # Environment Variables
 
 This project uses a `.env` file to store sensitive configuration values.  
