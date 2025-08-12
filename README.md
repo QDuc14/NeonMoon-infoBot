@@ -1,3 +1,7 @@
+# Install node module
+
+npm install
+
 # Environment Variables
 
 This project uses a `.env` file to store sensitive configuration values.  
