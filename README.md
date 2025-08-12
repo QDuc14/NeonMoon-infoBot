@@ -1,6 +1,6 @@
 # Install node module
 
-```
+```bash
 npm install
 ```
 # Environment Variables
@@ -10,6 +10,6 @@ Create a `.env` file in the root of the project before running the bot.
 
 ## Example `.env`
 
-```
+```env
 DISCORD_TOKEN=your_discord_bot_token_here
 PREFIX=!
