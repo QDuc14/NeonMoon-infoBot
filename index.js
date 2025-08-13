@@ -1,6 +1,7 @@
 import 'dotenv/config';
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, GatewayIntentBits, Events } from 'discord.js';
 import Database from 'better-sqlite3';
+import { DateTime } from 'luxon';
 
 const client = new Client({
   intents: [
@@ -11,9 +12,10 @@ const client = new Client({
 });
 
 const PREFIX = process.env.PREFIX || '!';
+const DEFAULT_TZ = process.env.DEFAULT_TZ || 'UTC';
 const db = new Database('kv.db');
 
-// Initialize table
+// ---------- DB schema ----------
 db.prepare(`
   CREATE TABLE IF NOT EXISTS kv (
     guild_id TEXT NOT NULL,
@@ -25,6 +27,28 @@ db.prepare(`
   )
 `).run();
 
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    tz TEXT NOT NULL
+  )
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    guild_id TEXT,
+    text TEXT NOT NULL,
+    run_at_iso TEXT NOT NULL, -- stored in UTC
+    delivered INTEGER NOT NULL DEFAULT 0,
+    created_at_iso TEXT NOT NULL
+  )
+`).run();
+db.prepare(`CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (delivered, run_at_iso)`).run();
+
+// ---------- KV prepared statements ----------
 const setStmt = db.prepare(`
   INSERT INTO kv (guild_id, key, value, author_id, updated_at)
   VALUES (@guild_id, @key, @value, @author_id, @updated_at)
@@ -37,11 +61,25 @@ const getStmt = db.prepare(`SELECT value FROM kv WHERE guild_id=? AND key=?`);
 const delStmt = db.prepare(`DELETE FROM kv WHERE guild_id=? AND key=?`);
 const allStmt = db.prepare(`SELECT key, value FROM kv WHERE guild_id=? ORDER BY key`);
 
-client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}`);
+// ---------- TZ & Reminders prepared statements ----------
+const setTZ = db.prepare(`INSERT INTO users(user_id, tz) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET tz=excluded.tz`);
+const getTZ = db.prepare(`SELECT tz FROM users WHERE user_id=?`);
+
+const insertReminder = db.prepare(`
+  INSERT INTO reminders (user_id, channel_id, guild_id, text, run_at_iso, delivered, created_at_iso)
+  VALUES (?, ?, ?, ?, ?, 0, ?)
+`);
+const dueReminders = db.prepare(`SELECT * FROM reminders WHERE delivered=0 AND run_at_iso <= ? ORDER BY run_at_iso ASC`);
+const markDelivered = db.prepare(`UPDATE reminders SET delivered=1 WHERE id=?`);
+
+// ---------- Bot lifecycle ----------
+client.once(Events.ClientReady, (c) => {
+  console.log(`Logged in as ${c.user.tag}`);
+  startScheduler();
 });
 
-client.on('messageCreate', (msg) => {
+// ---------- Prefix commands (existing) ----------
+client.on(Events.MessageCreate, (msg) => {
   if (msg.author.bot) return;
   if (!msg.content.startsWith(PREFIX)) return;
 
@@ -50,7 +88,6 @@ client.on('messageCreate', (msg) => {
 
   try {
     if (cmd === 'set') {
-      // !set <key> <value...>
       const key = rest.shift();
       if (!key) return msg.reply(`Usage: ${PREFIX}set <key> <value>`);
       const value = rest.join(' ');
@@ -66,7 +103,6 @@ client.on('messageCreate', (msg) => {
     }
 
     if (cmd === 'get') {
-      // !get <key>
       const key = rest[0];
       if (!key) return msg.reply(`Usage: ${PREFIX}get <key>`);
       const row = getStmt.get(guildId, key);
@@ -74,7 +110,6 @@ client.on('messageCreate', (msg) => {
     }
 
     if (cmd === 'del') {
-      // !del <key>
       const key = rest[0];
       if (!key) return msg.reply(`Usage: ${PREFIX}del <key>`);
       const info = delStmt.run(guildId, key);
@@ -82,13 +117,12 @@ client.on('messageCreate', (msg) => {
     }
 
     if (cmd === 'all') {
-      // !all [prefixFilter]
       const prefixFilter = rest[0];
       let rows = allStmt.all(guildId);
       if (prefixFilter) rows = rows.filter(r => r.key.startsWith(prefixFilter));
       if (rows.length === 0) return msg.reply('No entries yet.');
       const lines = rows.map(r => `• **${r.key}**: ${r.value}`);
-      return msg.reply(lines.join('\n').slice(0, 1900)); // stay under Discord limit
+      return msg.reply(lines.join('\n').slice(0, 1900));
     }
 
     if (cmd === 'help') {
@@ -106,5 +140,80 @@ ${PREFIX}help`
     msg.reply('Error processing command.');
   }
 });
+
+// ---------- Slash commands ----------
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  try {
+    if (interaction.commandName === 'settz') {
+      const tz = interaction.options.getString('tz', true);
+      const dt = DateTime.now().setZone(tz);
+      if (!dt.isValid) {
+        return interaction.reply({ content: '❌ Invalid timezone. Use an IANA name like `Asia/Ho_Chi_Minh` or `America/New_York`.', ephemeral: true });
+      }
+      setTZ.run(interaction.user.id, tz);
+      return interaction.reply({ content: `✅ Saved timezone: **${tz}** (now: ${dt.toFormat('yyyy-LL-dd HH:mm')})`, ephemeral: true });
+    }
+
+    if (interaction.commandName === 'mytime') {
+      const row = getTZ.get(interaction.user.id);
+      const tz = row?.tz || DEFAULT_TZ;
+      const now = DateTime.now().setZone(tz);
+      return interaction.reply({ content: `🕒 Your timezone: **${tz}** — ${now.toFormat('yyyy-LL-dd HH:mm')}`, ephemeral: true });
+    }
+
+    if (interaction.commandName === 'remind') {
+      const text = interaction.options.getString('text', true);
+      const when = interaction.options.getString('when', true);
+      const row = getTZ.get(interaction.user.id);
+      const tz = row?.tz || DEFAULT_TZ;
+      const dt = DateTime.fromFormat(when, 'yyyy-LL-dd HH:mm', { zone: tz });
+      if (!dt.isValid) {
+        return interaction.reply({ content: '❌ Could not parse date/time. Use `YYYY-MM-DD HH:mm` (24h).', ephemeral: true });
+      }
+      if (dt < DateTime.now().setZone(tz)) {
+        return interaction.reply({ content: '❌ That time is in the past.', ephemeral: true });
+      }
+      const runAtUTC = dt.toUTC().toISO();
+      insertReminder.run(
+        interaction.user.id,
+        interaction.channelId,
+        interaction.guildId || null,
+        text,
+        runAtUTC,
+        new Date().toISOString()
+      );
+      return interaction.reply({ content: `✅ Reminder saved for **${dt.toFormat('yyyy-LL-dd HH:mm')} ${tz}** (UTC ${dt.toUTC().toFormat('yyyy-LL-dd HH:mm')})`, ephemeral: true });
+    }
+  } catch (err) {
+    console.error(err);
+    if (interaction.deferred || interaction.replied) {
+      return interaction.followUp({ content: 'Error while executing command.', ephemeral: true });
+    }
+    return interaction.reply({ content: 'Error while executing command.', ephemeral: true });
+  }
+});
+
+// ---------- Scheduler ----------
+function startScheduler() {
+  setInterval(() => {
+    try {
+      const nowISO = DateTime.utc().toISO();
+      const rows = dueReminders.all(nowISO);
+      rows.forEach(async (r) => {
+        try {
+          const channel = await client.channels.fetch(r.channel_id);
+          await channel.send(`⏰ <@${r.user_id}> Reminder: **${r.text}**`);
+          markDelivered.run(r.id);
+        } catch (e) {
+          console.error('Failed to deliver reminder', r, e);
+        }
+      });
+    } catch (err) {
+      console.error('Scheduler tick error:', err);
+    }
+  }, 20_000);
+}
 
 client.login(process.env.DISCORD_TOKEN);
