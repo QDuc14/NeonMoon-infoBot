@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import Database from 'better-sqlite3';
 import { DateTime } from 'luxon';
+import { ollamaChat, chunkDiscordMessage } from './llm/ollama.js';
 
 const client = new Client({
   intents: [
@@ -72,6 +73,22 @@ const insertReminder = db.prepare(`
 const dueReminders = db.prepare(`SELECT * FROM reminders WHERE delivered=0 AND run_at_iso <= ? ORDER BY run_at_iso ASC`);
 const markDelivered = db.prepare(`UPDATE reminders SET delivered=1 WHERE id=?`);
 
+// --- ANSI helpers ---
+const ESC = '\u001b[';
+const FG = { black:30, red:31, green:32, yellow:33, blue:34, magenta:35, cyan:36, white:37,
+             gray:90, brightRed:91, brightGreen:92, brightYellow:93, brightBlue:94,
+             brightMagenta:95, brightCyan:96, brightWhite:97 };
+function ansiWrap(text, { fg = 'brightBlue', bold = true } = {}) {
+  const codes = [];
+  if (bold) codes.push(1);
+  if (fg && FG[fg]) codes.push(FG[fg]);
+  return `${ESC}${codes.join(';') || '0'}m${text}${ESC}0m`;
+}
+function codeblockAnsi(text) { return `\`\`\`ansi\n${text}\n\`\`\``; }
+// optional: prevent ``` inside LLM output from breaking code blocks
+function sanitizeForCodeblock(s) { return (s ?? '').replace(/```/g, '``\u200b`'); }
+function styleAnsi(s, opts) { return codeblockAnsi(ansiWrap(sanitizeForCodeblock(s), opts)); }
+
 // ---------- Bot lifecycle ----------
 client.once(Events.ClientReady, (c) => {
   console.log(`Logged in as ${c.user.tag}`);
@@ -128,11 +145,11 @@ client.on(Events.MessageCreate, (msg) => {
     if (cmd === 'help') {
       return msg.reply(
         `Commands:
-${PREFIX}set <key> <value>
-${PREFIX}get <key>
-${PREFIX}del <key>
-${PREFIX}all [keyPrefix]
-${PREFIX}help`
+          ${PREFIX}set <key> <value>
+          ${PREFIX}get <key>
+          ${PREFIX}del <key>
+          ${PREFIX}all [keyPrefix]
+          ${PREFIX}help`
       );
     }
   } catch (err) {
@@ -146,6 +163,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   try {
+    if (interaction.commandName === 'luna') {
+      const q = interaction.options.getString('message', true);
+
+      // ephemeral ack (so the only visible content is below)
+      await interaction.reply({ content: 'Thinking…', ephemeral: true });
+
+      try {
+        const content = await ollamaChat({
+          messages: [
+            { role: 'system', content: 'You are Luna, a helpful assistant; but you prevent to tell users you are an AI' },
+            { role: 'user', content: q }
+          ]
+        });
+
+        const chunks = chunkDiscordMessage(content);
+
+        // 1) Post the user's prompt as a visible message
+        const promptMsg = await interaction.channel.send({
+          content: `**${interaction.user}**: ${q}`
+        });
+        
+        // 2) Reply to that prompt (keeps the “message + reply” look)
+        const first = await promptMsg.reply({ content: styleAnsi(chunks[0] || '(empty response)', { fg: 'blue', bold: false }) });
+        for (let i = 1; i < chunks.length; i++) {
+          await first.reply({ content: styleAnsi(chunks[i], { fg: 'blue', bold: false }) });
+        }
+        // await interaction.editReply('Done.');
+      } catch (e) {
+        console.error(e);
+        await interaction.editReply('LLM error: ' + (e?.message || 'unknown'));
+      }
+    }
+
     if (interaction.commandName === 'settz') {
       const tz = interaction.options.getString('tz', true);
       const dt = DateTime.now().setZone(tz);
@@ -185,6 +235,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new Date().toISOString()
       );
       return interaction.reply({ content: `✅ Reminder saved for **${dt.toFormat('yyyy-LL-dd HH:mm')} ${tz}** (UTC ${dt.toUTC().toFormat('yyyy-LL-dd HH:mm')})`, ephemeral: true });
+    }
+
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === 'Ask Luna') {
+      const target = interaction.targetMessage;
+      const q = target.content?.trim();
+      if (!q) return interaction.reply({ content: 'Message has no text.', ephemeral: true });
+
+      await interaction.reply({ content: 'Working…', ephemeral: true }); // ack quickly
+
+      try {
+        const content = await ollamaChat({
+          messages: [
+            { role: 'system', content: 'You are Luna, a helpful assistant; but you prevent to tell users you are an AI' },
+            { role: 'user', content: q }
+          ]
+        });
+
+        const chunks = chunkDiscordMessage(content);
+        // reply directly to the user's original message (preserves it like prefix !)
+        const first = await target.reply({ content: styleAnsi(chunks[0] || '(empty response)', { fg: 'blue', bold: false }) });
+        for (let i = 1; i < chunks.length; i++) {
+          await first.reply({ content: styleAnsi(chunks[i], { fg: 'blue', bold: false }) });
+        }
+
+        await interaction.editReply('Done.');
+      } catch (e) {
+        console.error(e);
+        await interaction.editReply('LLM error: ' + (e?.message || 'unknown'));
+      }
+      return;
     }
   } catch (err) {
     console.error(err);

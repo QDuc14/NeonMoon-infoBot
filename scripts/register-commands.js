@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { REST, Routes, SlashCommandBuilder, ContextMenuCommandBuilder, ApplicationCommandType } from 'discord.js';
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
@@ -25,6 +25,15 @@ const commands = [
     .setDescription('Schedule a reminder (YYYY-MM-DD HH:mm) in your timezone')
     .addStringOption(o => o.setName('text').setDescription('What to remind you about').setRequired(true))
     .addStringOption(o => o.setName('when').setDescription('When (YYYY-MM-DD HH:mm)').setRequired(true))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName('luna')
+    .setDescription('Luna-chan')
+    .addStringOption(o => o.setName('message').setDescription('Your message').setRequired(true))
+    .toJSON(),
+  new ContextMenuCommandBuilder()
+    .setName('Ask Luna')
+    .setType(ApplicationCommandType.Message)
     .toJSON()
 ];
 
