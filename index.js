@@ -73,6 +73,30 @@ const insertReminder = db.prepare(`
 const dueReminders = db.prepare(`SELECT * FROM reminders WHERE delivered=0 AND run_at_iso <= ? ORDER BY run_at_iso ASC`);
 const markDelivered = db.prepare(`UPDATE reminders SET delivered=1 WHERE id=?`);
 
+// ---------- Luna recognizing ----------
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id  TEXT,
+    channel_id TEXT,
+    user_id   TEXT,
+    role      TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+    content   TEXT NOT NULL,
+    ts        INTEGER NOT NULL
+  )
+`).run();
+db.prepare(`CREATE INDEX IF NOT EXISTS idx_memory ON memory(guild_id, channel_id, user_id, ts)`).run();
+
+const memInsert = db.prepare(
+  `INSERT INTO memory (guild_id, channel_id, user_id, role, content, ts)
+   VALUES (?,?,?,?,?,?)`
+);
+const memRecent = db.prepare(
+  `SELECT role, content FROM memory
+     WHERE guild_id=? AND channel_id=? AND user_id=?
+     ORDER BY ts DESC LIMIT ?`
+);
+
 // --- ANSI helpers ---
 const ESC = '\u001b[';
 const FG = { black:30, red:31, green:32, yellow:33, blue:34, magenta:35, cyan:36, white:37,
@@ -104,29 +128,40 @@ client.on(Events.MessageCreate, async (msg) => {
 
   if (msg.mentions.users.has(client.user.id)) {
     let q = (msg.content || '')
-    q = q.replace(/^[,:\-\s]+/, ''); // strip comma/colon/space after mention
+      .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '') // strip @Luna mention(s)
+      .replace(/^[,:\-\s]+/, '')                              // strip comma/colon/dash/space after mention
+      .trim();
 
     if (!q) {
       return msg.reply({ content: 'Ping me like: `hei @Luna, I need your help?`',
         allowedMentions: { repliedUser: false } });
     }
+
     try {
       const content = await ollamaChat({
-        messages: [
-          { role: 'system', content: 'You are Luna, a helpful assistant; but you prevent to tell users you are an AI' },
-          { role: 'user', content: q }
-        ]
+        messages: [{ role: 'user', content: q }]
       });
 
-      const chunks = chunkDiscordMessage(content, 1800);
+      const chunks = chunkDiscordMessage(content, 1900); // keep some headroom
+      const joined = chunks.join('\n');
+
+      // If it fits in one Discord message, send once (styled)
+      if (joined.length <= 1900) {
+        return msg.reply({
+          content: joined, // single blue block
+          allowedMentions: { repliedUser: false, parse: [] }
+        });
+      }
+
+      // Otherwise, fallback to multiple messages (all styled)
       const first = await msg.reply({
-        content: chunks[0] || '(empty response)',
-        allowedMentions: { repliedUser: false }
+        content: styleAnsi(chunks[0] || '(empty response)', { fg: 'blue', bold: false }),
+        allowedMentions: { repliedUser: false, parse: [] }
       });
       for (let i = 1; i < chunks.length; i++) {
         await first.reply({
-          content: styleAnsi(chunks[i], { fg: 'blue' }),
-          allowedMentions: { repliedUser: false }
+          content: chunks[i],
+          allowedMentions: { repliedUser: false, parse: [] }
         });
       }
     } catch (e) {
