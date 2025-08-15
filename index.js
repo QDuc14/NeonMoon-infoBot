@@ -96,13 +96,49 @@ client.once(Events.ClientReady, (c) => {
 });
 
 // ---------- Prefix commands (existing) ----------
-client.on(Events.MessageCreate, (msg) => {
+client.on(Events.MessageCreate, async (msg) => {
   if (msg.author.bot) return;
-  if (!msg.content.startsWith(PREFIX)) return;
 
   const [cmd, ...rest] = msg.content.slice(PREFIX.length).trim().split(/\s+/);
   const guildId = msg.guild?.id ?? `DM-${msg.author.id}`;
 
+  if (msg.mentions.users.has(client.user.id)) {
+    let q = (msg.content || '')
+    q = q.replace(/^[,:\-\s]+/, ''); // strip comma/colon/space after mention
+
+    if (!q) {
+      return msg.reply({ content: 'Ping me like: `hei @Luna, I need your help?`',
+        allowedMentions: { repliedUser: false } });
+    }
+    try {
+      const content = await ollamaChat({
+        messages: [
+          { role: 'system', content: 'You are Luna, a helpful assistant; but you prevent to tell users you are an AI' },
+          { role: 'user', content: q }
+        ]
+      });
+
+      const chunks = chunkDiscordMessage(content, 1800);
+      const first = await msg.reply({
+        content: chunks[0] || '(empty response)',
+        allowedMentions: { repliedUser: false }
+      });
+      for (let i = 1; i < chunks.length; i++) {
+        await first.reply({
+          content: styleAnsi(chunks[i], { fg: 'blue' }),
+          allowedMentions: { repliedUser: false }
+        });
+      }
+    } catch (e) {
+      console.error(e);
+      await msg.reply({ content: 'LLM error: ' + (e?.message || 'unknown'),
+        allowedMentions: { repliedUser: false } });
+    }
+    return;
+  }
+
+  // --- Handle prefix commands
+  if (!msg.content.startsWith(PREFIX)) return;
   try {
     if (cmd === 'set') {
       const key = rest.shift();
@@ -160,7 +196,7 @@ client.on(Events.MessageCreate, (msg) => {
 
 // ---------- Slash commands ----------
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
 
   try {
     if (interaction.commandName === 'luna') {
@@ -237,7 +273,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.reply({ content: `✅ Reminder saved for **${dt.toFormat('yyyy-LL-dd HH:mm')} ${tz}** (UTC ${dt.toUTC().toFormat('yyyy-LL-dd HH:mm')})`, ephemeral: true });
     }
 
-    if (interaction.isMessageContextMenuCommand() && interaction.commandName === 'Ask Luna') {
+    if (interaction.commandName === 'Ask Luna') {
       const target = interaction.targetMessage;
       const q = target.content?.trim();
       if (!q) return interaction.reply({ content: 'Message has no text.', ephemeral: true });
