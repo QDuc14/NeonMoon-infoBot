@@ -73,30 +73,6 @@ const insertReminder = db.prepare(`
 const dueReminders = db.prepare(`SELECT * FROM reminders WHERE delivered=0 AND run_at_iso <= ? ORDER BY run_at_iso ASC`);
 const markDelivered = db.prepare(`UPDATE reminders SET delivered=1 WHERE id=?`);
 
-// ---------- Luna recognizing ----------
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS memory (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id  TEXT,
-    channel_id TEXT,
-    user_id   TEXT,
-    role      TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
-    content   TEXT NOT NULL,
-    ts        INTEGER NOT NULL
-  )
-`).run();
-db.prepare(`CREATE INDEX IF NOT EXISTS idx_memory ON memory(guild_id, channel_id, user_id, ts)`).run();
-
-const memInsert = db.prepare(
-  `INSERT INTO memory (guild_id, channel_id, user_id, role, content, ts)
-   VALUES (?,?,?,?,?,?)`
-);
-const memRecent = db.prepare(
-  `SELECT role, content FROM memory
-     WHERE guild_id=? AND channel_id=? AND user_id=?
-     ORDER BY ts DESC LIMIT ?`
-);
-
 // --- ANSI helpers ---
 const ESC = '\u001b[';
 const FG = { black:30, red:31, green:32, yellow:33, blue:34, magenta:35, cyan:36, white:37,
@@ -145,15 +121,15 @@ client.on(Events.MessageCreate, async (msg) => {
       const chunks = chunkDiscordMessage(content, 1900); // keep some headroom
       const joined = chunks.join('\n');
 
-      // If it fits in one Discord message, send once (styled)
+      // If it fits in one Discord message, send once
       if (joined.length <= 1900) {
         return msg.reply({
-          content: joined, // single blue block
+          content: joined,
           allowedMentions: { repliedUser: false, parse: [] }
         });
       }
 
-      // Otherwise, fallback to multiple messages (all styled)
+      // Otherwise, fallback to multiple messages
       const first = await msg.reply({
         content: styleAnsi(chunks[0] || '(empty response)', { fg: 'blue', bold: false }),
         allowedMentions: { repliedUser: false, parse: [] }
