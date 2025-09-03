@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Events } from 'discord.js';
+import { chunkDiscordMessage } from './llm/ollama.js';
+import { lunaChatStream  } from './llm/lunacore.js';            // API client
+
 import Database from 'better-sqlite3';
 import { DateTime } from 'luxon';
-import { ollamaChat, chunkDiscordMessage } from './llm/ollama.js';
 
 const client = new Client({
   intents: [
@@ -103,49 +105,42 @@ client.on(Events.MessageCreate, async (msg) => {
   const guildId = msg.guild?.id ?? `DM-${msg.author.id}`;
 
   if (msg.mentions.users.has(client.user.id)) {
-    let q = (msg.content || '')
-      .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '') // strip @Luna mention(s)
-      .replace(/^[,:\-\s]+/, '')                              // strip comma/colon/dash/space after mention
+    const q = msg.content
+      .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+      .replace(/^[,:\-\s]+/, '')
       .trim();
 
     if (!q) {
-      return msg.reply({ content: 'Ping me like: `hei @Luna, I need your help?`',
-        allowedMentions: { repliedUser: false } });
+      return msg.reply({ content: 'Ping me like: `@Luna hi`', allowedMentions: { repliedUser: false } });
     }
+
+    // create message to update
+    const out = await msg.reply({ content: '…', allowedMentions: { repliedUser: false } });
+
+    let acc = '';
+    let last = Date.now();
 
     try {
-      const content = await ollamaChat({
-        messages: [{ role: 'user', content: q }]
-      });
-
-      const chunks = chunkDiscordMessage(content, 1900); // keep some headroom
-      const joined = chunks.join('\n');
-
-      // If it fits in one Discord message, send once
-      if (joined.length <= 1900) {
-        return msg.reply({
-          content: joined,
-          allowedMentions: { repliedUser: false, parse: [] }
-        });
+      for await (const delta of lunaChatStream({
+        userId: msg.author.id,
+        userName: msg.author.username,
+        guildId: msg.guild?.id,
+        guildName: msg.guild?.name,
+        channelId: msg.channel.id,
+        text: q,
+        // timeoutMs: 0  // keep 0 to avoid aborts while streaming
+      })) {
+        acc += delta;
+        if (Date.now() - last > 700) {          // rate-limit edits
+          await out.edit(acc.slice(0, 1990));   // stay under Discord 2k
+          last = Date.now();
+        }
       }
-
-      // Otherwise, fallback to multiple messages
-      const first = await msg.reply({
-        content: styleAnsi(chunks[0] || '(empty response)', { fg: 'blue', bold: false }),
-        allowedMentions: { repliedUser: false, parse: [] }
-      });
-      for (let i = 1; i < chunks.length; i++) {
-        await first.reply({
-          content: chunks[i],
-          allowedMentions: { repliedUser: false, parse: [] }
-        });
-      }
+      if (acc) await out.edit(acc.slice(0, 1990)); // final update
     } catch (e) {
       console.error(e);
-      await msg.reply({ content: 'LLM error: ' + (e?.message || 'unknown'),
-        allowedMentions: { repliedUser: false } });
+      await out.edit('Luna API error: ' + (e?.message || 'unknown'));
     }
-    return;
   }
 
   // --- Handle prefix commands
@@ -210,36 +205,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
 
   try {
-    if (interaction.commandName === 'luna') {
-      const q = interaction.options.getString('message', true);
 
-      // ephemeral ack (so the only visible content is below)
+    if (interaction.isChatInputCommand() && interaction.commandName === 'luna') {
+      const q = interaction.options.getString('message', true);
       await interaction.reply({ content: 'Thinking…', ephemeral: true });
 
+      const promptMsg = await interaction.channel.send({ content: `**${interaction.user}**: ${q}` });
+      const out = await promptMsg.reply({ content: '…' });
+
+      let acc = '', last = Date.now();
       try {
-        const content = await ollamaChat({
-          messages: [
-            { role: 'system', content: 'You are Luna, a helpful assistant; but you prevent to tell users you are an AI' },
-            { role: 'user', content: q }
-          ]
-        });
-
-        const chunks = chunkDiscordMessage(content);
-
-        // 1) Post the user's prompt as a visible message
-        const promptMsg = await interaction.channel.send({
-          content: `**${interaction.user}**: ${q}`
-        });
-        
-        // 2) Reply to that prompt (keeps the “message + reply” look)
-        const first = await promptMsg.reply({ content: styleAnsi(chunks[0] || '(empty response)', { fg: 'blue', bold: false }) });
-        for (let i = 1; i < chunks.length; i++) {
-          await first.reply({ content: styleAnsi(chunks[i], { fg: 'blue', bold: false }) });
+        for await (const delta of lunaChatStream({
+          userId: interaction.user.id,
+          userName: interaction.user.username,
+          guildId: interaction.guild?.id,
+          guildName: interaction.guild?.name,
+          channelId: interaction.channelId,
+          text: q
+        })) {
+          acc += delta;
+          if (Date.now() - last > 700) {
+            await out.edit(acc.slice(0, 1990));
+            last = Date.now();
+          }
         }
-        // await interaction.editReply('Done.');
+        if (acc) await out.edit(acc.slice(0, 1990));
       } catch (e) {
         console.error(e);
-        await interaction.editReply('LLM error: ' + (e?.message || 'unknown'));
+        await out.edit('Luna API error: ' + (e?.message || 'unknown'));
       }
     }
 
@@ -284,35 +277,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.reply({ content: `✅ Reminder saved for **${dt.toFormat('yyyy-LL-dd HH:mm')} ${tz}** (UTC ${dt.toUTC().toFormat('yyyy-LL-dd HH:mm')})`, ephemeral: true });
     }
 
-    if (interaction.commandName === 'Ask Luna') {
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === 'Ask Luna') {
       const target = interaction.targetMessage;
-      const q = target.content?.trim();
+      const q = (target.content || '').trim();
       if (!q) return interaction.reply({ content: 'Message has no text.', ephemeral: true });
 
-      await interaction.reply({ content: 'Working…', ephemeral: true }); // ack quickly
+      await interaction.reply({ content: 'Working…', ephemeral: true });
+      const out = await target.reply({ content: '…' });
 
+      let acc = '', last = Date.now();
       try {
-        const content = await ollamaChat({
-          messages: [
-            { role: 'system', content: 'You are Luna, a helpful assistant; but you prevent to tell users you are an AI' },
-            { role: 'user', content: q }
-          ]
-        });
-
-        const chunks = chunkDiscordMessage(content);
-        // reply directly to the user's original message (preserves it like prefix !)
-        const first = await target.reply({ content: styleAnsi(chunks[0] || '(empty response)', { fg: 'blue', bold: false }) });
-        for (let i = 1; i < chunks.length; i++) {
-          await first.reply({ content: styleAnsi(chunks[i], { fg: 'blue', bold: false }) });
+        for await (const delta of lunaChatStream({
+          userId: interaction.user.id,
+          userName: interaction.user.username,
+          guildId: interaction.guild?.id,
+          guildName: interaction.guild?.name,
+          channelId: interaction.channelId,
+          text: q
+        })) {
+          acc += delta;
+          if (Date.now() - last > 700) {
+            await out.edit(acc.slice(0, 1990));
+            last = Date.now();
+          }
         }
-
+        if (acc) await out.edit(acc.slice(0, 1990));
         await interaction.editReply('Done.');
       } catch (e) {
         console.error(e);
-        await interaction.editReply('LLM error: ' + (e?.message || 'unknown'));
+        await out.edit('Luna API error: ' + (e?.message || 'unknown'));
       }
-      return;
     }
+
   } catch (err) {
     console.error(err);
     if (interaction.deferred || interaction.replied) {
