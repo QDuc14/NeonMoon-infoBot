@@ -105,6 +105,12 @@ client.on(Events.MessageCreate, async (msg) => {
   const guildId = msg.guild?.id ?? `DM-${msg.author.id}`;
 
   if (msg.mentions.users.has(client.user.id)) {
+    const rowTZ = getTZ.get(msg.author.id);
+    const tz = rowTZ?.tz || DEFAULT_TZ;
+    const out = await msg.reply({ content: '…', allowedMentions: { repliedUser: false } });
+    let acc = '';
+    let last = Date.now();
+
     const q = msg.content
       .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
       .replace(/^[,:\-\s]+/, '')
@@ -115,11 +121,6 @@ client.on(Events.MessageCreate, async (msg) => {
     }
 
     // create message to update
-    const out = await msg.reply({ content: '…', allowedMentions: { repliedUser: false } });
-
-    let acc = '';
-    let last = Date.now();
-
     try {
       for await (const delta of lunaChatStream({
         userId: msg.author.id,
@@ -128,18 +129,18 @@ client.on(Events.MessageCreate, async (msg) => {
         guildName: msg.guild?.name,
         channelId: msg.channel.id,
         text: q,
-        // timeoutMs: 0  // keep 0 to avoid aborts while streaming
+        userTz: tz
       })) {
         acc += delta;
-        if (Date.now() - last > 700) {          // rate-limit edits
-          await out.edit(acc.slice(0, 1990));   // stay under Discord 2k
+        if (Date.now() - last > 700) {
+          await out.edit(acc.slice(0, 1990));
           last = Date.now();
         }
       }
-      if (acc) await out.edit(acc.slice(0, 1990)); // final update
+      if (acc) await out.edit(acc.slice(0, 1990));
     } catch (e) {
       console.error(e);
-      await out.edit('Luna API error: ' + (e?.message || 'unknown'));
+      await out.edit(`I'm having trouble connecting to the main server, can someone help me ping Skeath?`);
     }
   }
 
@@ -215,13 +216,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       let acc = '', last = Date.now();
       try {
+        const rowTZ = getTZ.get(interaction.user.id);
+        const tz = rowTZ?.tz || DEFAULT_TZ;
+
         for await (const delta of lunaChatStream({
           userId: interaction.user.id,
           userName: interaction.user.username,
           guildId: interaction.guild?.id,
           guildName: interaction.guild?.name,
           channelId: interaction.channelId,
-          text: q
+          text: q,
+          userTz: tz
         })) {
           acc += delta;
           if (Date.now() - last > 700) {
@@ -287,13 +292,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       let acc = '', last = Date.now();
       try {
+        const rowTZ = getTZ.get(interaction.user.id);
+        const tz = rowTZ?.tz || DEFAULT_TZ;
+
         for await (const delta of lunaChatStream({
           userId: interaction.user.id,
           userName: interaction.user.username,
           guildId: interaction.guild?.id,
           guildName: interaction.guild?.name,
           channelId: interaction.channelId,
-          text: q
+          text: q,
+          userTz: tz
         })) {
           acc += delta;
           if (Date.now() - last > 700) {

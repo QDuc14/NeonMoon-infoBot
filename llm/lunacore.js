@@ -1,12 +1,15 @@
 export async function* lunaChatStream({
   userId, userName, guildId, guildName, channelId,
   text, messages, model, conversationId, metadata = {},
-  timeoutMs = 0
+  timeoutMs = 0,
+  userTz,                     // NEW: forward user's timezone
+  useServerMemory             // NEW: per-call override
 } = {}) {
   const BASE  = process.env.LUNACORE_BASE_URL || 'http://127.0.0.1:8000';
   const KEY   = process.env.LUNA_API_KEY || '';
-  const MODEL = process.env.LUNA_MODEL || process.env.OLLAMA_MODEL || 'luna-mistral';
-  const USE_MEMORY = (process.env.LUNA_USE_SERVER_MEMORY ?? 'true').toString().toLowerCase() === 'true';
+  const MODEL = process.env.LUNA_MODEL || process.env.OLLAMA_MODEL || 'luna';
+  const USE_MEMORY_ENV = (process.env.LUNA_USE_SERVER_MEMORY ?? 'true').toString().toLowerCase() === 'true';
+  const USE_MEMORY = typeof useServerMemory === 'boolean' ? useServerMemory : USE_MEMORY_ENV;
 
   const body = {
     model: model || MODEL,
@@ -15,8 +18,9 @@ export async function* lunaChatStream({
       : [{ role: 'user', content: String(text ?? '').trim() }],
     user_id: userId,
     user_name: userName,
-    conversation_id: conversationId || `${guildId || 'DM'}:${channelId || 'NA'}`,
+    conversation_id: `${guildId || 'DM'}`,
     use_server_memory: USE_MEMORY,
+    user_tz: userTz,          // NEW
     metadata
   };
 
@@ -49,7 +53,7 @@ export async function* lunaChatStream({
     if (done) break;
     buf += decoder.decode(value, { stream: true });
 
-    // Split SSE frames by the blank line separator
+    // Split SSE frames by blank line
     let sep;
     while ((sep = buf.indexOf('\n\n')) !== -1) {
       const frame = buf.slice(0, sep);
@@ -60,27 +64,26 @@ export async function* lunaChatStream({
       const datas = [];
 
       for (const rawLine of frame.split(/\r?\n/)) {
-        // do not trim leading/trailing spaces globally
         if (rawLine.startsWith('event:')) {
-          event = rawLine.slice(6).trim();     // trimming the event type is fine
+          event = rawLine.slice(6).trim();
         } else if (rawLine.startsWith('data:')) {
-          // keep payload spaces; just remove the "data:" prefix and ONE optional leading space
           let payload = rawLine.slice(5);
           if (payload.startsWith(' ')) payload = payload.slice(1);
           datas.push(payload);
         }
       }
 
-      const payload = datas.join('\n'); // preserve embedded newlines
+      const payload = datas.join('\n');
 
       if (event === 'error') {
-        throw new Error(payload || 'stream error');
+        // throw new Error(payload || 'stream error');
+        yield `I'm having trouble connecting to the main server, can someone help me ping Skeath?`
       }
       if (event === 'done') {
-        return; // final frame (your server puts full text in data; we stop)
+        return;
       }
       if (payload) {
-        yield payload; // this chunk may begin with a space — keep it!
+        yield payload;
       }
     }
   }
